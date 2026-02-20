@@ -45,12 +45,10 @@ jobs:
     steps:
       - name: Trigger orchestrator redeploy
         run: |
-          gh api \
-            --method POST \
-            -H "Accept: application/vnd.github+json" \
-            /repos/runtools-ai/runtools-orchestrator/dispatches \
-            -f event_type=auth-image-updated \
-            -f client_payload='{"reason":"runtools-auth image updated","sha":"${{ github.sha }}"}'
+          jq -n \
+            --arg sha "${{ github.sha }}" \
+            '{"event_type": "auth-image-updated", "client_payload": {"reason": "runtools-auth image updated", "sha": $sha}}' \
+            | gh api /repos/runtools-ai/runtools-orchestrator/dispatches --input -
           echo "✅ Triggered orchestrator deploy (will pick up new runtools-auth:latest)"
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
