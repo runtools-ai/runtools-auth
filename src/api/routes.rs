@@ -59,6 +59,10 @@ pub fn v1_router(state: SharedState) -> Router {
         .route("/oauth/token/{provider}", get(oauth_token))
         .route("/oauth/connections", get(oauth_connections))
         .route("/oauth/connections/{id}", delete(oauth_connection_delete))
+        // ── WorkOS Org Management (internal) ─────────────────────────────
+        .route("/workos/organizations", post(workos_org_create))
+        .route("/workos/organizations/{id}", patch(workos_org_update))
+        .route("/workos/memberships", post(workos_membership_create))
         // ── Webhooks ─────────────────────────────────────────────────────
         .route("/webhooks/workos", post(workos_webhooks::workos_webhook))
         .with_state(state)
@@ -887,4 +891,153 @@ async fn oauth_connection_delete(
         .await?;
 
     Ok(Json(json!({ "data": { "success": true } })))
+}
+
+// =============================================================================
+// WorkOS Organization Proxy Endpoints (internal service-to-service)
+// =============================================================================
+
+/// Require internal service-to-service auth (X-Internal-Secret header).
+fn require_internal(state: &SharedState, headers: &HeaderMap) -> Result<(), AuthError> {
+    let secret = headers
+        .get("x-internal-secret")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(AuthError::Unauthorized)?;
+    if secret != state.config.auth_service_secret {
+        return Err(AuthError::Unauthorized);
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct WorkosOrgCreateBody {
+    name: String,
+}
+
+/// POST /v1/workos/organizations — Create a WorkOS organization.
+///
+/// Internal endpoint — requires X-Internal-Secret.
+/// Proxies to WorkOS REST API: POST https://api.workos.com/organizations
+async fn workos_org_create(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(body): Json<WorkosOrgCreateBody>,
+) -> Result<Json<serde_json::Value>, AuthError> {
+    require_internal(&state, &headers)?;
+
+    let api_key = state.config.workos_api_key.as_deref()
+        .ok_or_else(|| AuthError::Internal("WORKOS_API_KEY not configured".into()))?;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://api.workos.com/organizations")
+        .bearer_auth(api_key)
+        .json(&json!({ "name": body.name }))
+        .send()
+        .await
+        .map_err(|e| AuthError::Internal(format!("WorkOS API call failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(AuthError::Internal(format!("WorkOS create org failed ({status}): {text}")));
+    }
+
+    let workos_org: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| AuthError::Internal(format!("WorkOS response parse failed: {e}")))?;
+
+    Ok(Json(json!({ "data": workos_org })))
+}
+
+#[derive(Deserialize)]
+struct WorkosOrgUpdateBody {
+    name: String,
+}
+
+/// PATCH /v1/workos/organizations/:id — Update a WorkOS organization.
+///
+/// Internal endpoint — requires X-Internal-Secret.
+/// Proxies to WorkOS REST API: PUT https://api.workos.com/organizations/:id
+async fn workos_org_update(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<WorkosOrgUpdateBody>,
+) -> Result<Json<serde_json::Value>, AuthError> {
+    require_internal(&state, &headers)?;
+
+    let api_key = state.config.workos_api_key.as_deref()
+        .ok_or_else(|| AuthError::Internal("WORKOS_API_KEY not configured".into()))?;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .put(format!("https://api.workos.com/organizations/{id}"))
+        .bearer_auth(api_key)
+        .json(&json!({ "name": body.name }))
+        .send()
+        .await
+        .map_err(|e| AuthError::Internal(format!("WorkOS API call failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(AuthError::Internal(format!("WorkOS update org failed ({status}): {text}")));
+    }
+
+    let workos_org: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| AuthError::Internal(format!("WorkOS response parse failed: {e}")))?;
+
+    Ok(Json(json!({ "data": workos_org })))
+}
+
+#[derive(Deserialize)]
+struct WorkosMembershipCreateBody {
+    user_id: String,
+    organization_id: String,
+    role_slug: String,
+}
+
+/// POST /v1/workos/memberships — Create a WorkOS organization membership.
+///
+/// Internal endpoint — requires X-Internal-Secret.
+/// Proxies to WorkOS REST API: POST https://api.workos.com/user_management/organization_memberships
+async fn workos_membership_create(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(body): Json<WorkosMembershipCreateBody>,
+) -> Result<Json<serde_json::Value>, AuthError> {
+    require_internal(&state, &headers)?;
+
+    let api_key = state.config.workos_api_key.as_deref()
+        .ok_or_else(|| AuthError::Internal("WORKOS_API_KEY not configured".into()))?;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://api.workos.com/user_management/organization_memberships")
+        .bearer_auth(api_key)
+        .json(&json!({
+            "user_id": body.user_id,
+            "organization_id": body.organization_id,
+            "role_slug": body.role_slug
+        }))
+        .send()
+        .await
+        .map_err(|e| AuthError::Internal(format!("WorkOS API call failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(AuthError::Internal(format!("WorkOS create membership failed ({status}): {text}")));
+    }
+
+    let membership: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| AuthError::Internal(format!("WorkOS response parse failed: {e}")))?;
+
+    Ok(Json(json!({ "data": membership })))
 }
