@@ -243,9 +243,8 @@ pub async fn verify_token(
 
         // Build validation config
         let mut validation = Validation::new(Algorithm::RS256);
-        // WorkOS issuer format: https://api.workos.com/user_management/{client_id}
-        // We disable the built-in issuer check and do a prefix check manually below
-        validation.set_issuer(&[] as &[&str]);
+        // Don't set_issuer — we do a manual prefix check after decode
+        // (WorkOS issuer includes client_id in path, exact match doesn't work)
         validation.validate_exp = true;
 
         // Decode and verify the full JWT
