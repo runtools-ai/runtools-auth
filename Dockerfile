@@ -39,6 +39,7 @@ WORKDIR /app
 # ca-certificates: required for TLS connections to WorkOS API, JWKS endpoint, etc.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -54,6 +55,6 @@ USER runtools
 EXPOSE 8420
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:8420/v1/status || exit 1
+  CMD curl -f http://localhost:8420/v1/status || exit 1
 
 CMD ["/usr/local/bin/runtools-auth"]
