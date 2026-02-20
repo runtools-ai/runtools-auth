@@ -243,7 +243,7 @@ pub async fn verify_token(
 
         // Build validation config
         let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_issuer(&["https://api.workos.com"]);
+        validation.set_issuer(&["https://api.workos.com/", "https://api.workos.com"]);
         validation.validate_exp = true;
 
         // Decode and verify the full JWT
@@ -277,7 +277,7 @@ pub async fn verify_token(
             return Err(AuthError::TokenExpired);
         }
         if !payload.iss.starts_with("https://api.workos.com") {
-            return Err(AuthError::InvalidToken("invalid issuer".into()));
+            return Err(AuthError::InvalidToken(format!("invalid issuer: {}", payload.iss)));
         }
 
         payload
