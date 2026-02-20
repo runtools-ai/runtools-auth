@@ -1,0 +1,68 @@
+[package]
+name = "runtools-auth"
+version = "0.1.0"
+edition = "2021"
+description = "Unified authentication, credential management, and OAuth for the Runtools platform."
+license = "MIT"
+repository = "https://github.com/runtools-ai/runtools-auth"
+
+[[bin]]
+name = "runtools-auth"
+path = "src/main.rs"
+
+[dependencies]
+# Web framework
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client (for WorkOS API + OAuth provider token exchange)
+reqwest = { version = "0.12", features = ["json"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Database (PostgreSQL — shared with orchestrator/tools/billing)
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid"] }
+
+# Crypto (AES-256-GCM encryption + HMAC state signing + password hashing)
+aes-gcm = "0.10"
+rand = "0.8"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+ulid = "1"
+
+# JWT validation
+jsonwebtoken = "9"
+
+# Config
+dotenvy = "0.15"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# URL encoding
+url = "2"
+
+# Async trait
+async-trait = "0.1"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

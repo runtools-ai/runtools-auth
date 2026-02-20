@@ -1,0 +1,56 @@
+name: Build and Deploy Auth Service
+
+on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - '*.md'
+  workflow_dispatch:
+
+env:
+  REGISTRY: registry.digitalocean.com
+  REGISTRY_NAME: runtools
+
+jobs:
+  build:
+    name: Build runtools-auth
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_TOKEN }}
+
+      - name: Log in to DOCR
+        run: doctl registry login --expiry-seconds 1200
+
+      - name: Build and push Docker image
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.REGISTRY_NAME }}/runtools-auth"
+          docker build \
+            -t ${IMAGE}:${{ github.sha }} \
+            -t ${IMAGE}:latest \
+            .
+          docker push ${IMAGE}:${{ github.sha }}
+          docker push ${IMAGE}:latest
+          echo "✅ Pushed: ${IMAGE}:latest"
+
+  trigger-deploy:
+    name: Trigger Orchestrator Deploy
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Trigger orchestrator redeploy
+        run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            /repos/runtools-ai/runtools-orchestrator/dispatches \
+            -f event_type=auth-image-updated \
+            -f client_payload='{"reason":"runtools-auth image updated","sha":"${{ github.sha }}"}'
+          echo "✅ Triggered orchestrator deploy (will pick up new runtools-auth:latest)"
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
