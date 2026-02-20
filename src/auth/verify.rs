@@ -243,18 +243,22 @@ pub async fn verify_token(
 
         // Build validation config
         let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_issuer(&["https://api.workos.com/", "https://api.workos.com"]);
+        // WorkOS issuer format: https://api.workos.com/user_management/{client_id}
+        // We disable the built-in issuer check and do a prefix check manually below
+        validation.set_issuer(&[] as &[&str]);
         validation.validate_exp = true;
 
         // Decode and verify the full JWT
         let token_data = decode::<WorkOSJWTPayload>(access_token, &decoding_key, &validation)
             .map_err(|e| match e.kind() {
                 jsonwebtoken::errors::ErrorKind::ExpiredSignature => AuthError::TokenExpired,
-                jsonwebtoken::errors::ErrorKind::InvalidIssuer => {
-                    AuthError::InvalidToken("invalid issuer".into())
-                }
                 _ => AuthError::InvalidToken(format!("JWT verification failed: {e}")),
             })?;
+
+        // Manual issuer check — WorkOS includes client_id in the issuer path
+        if !token_data.claims.iss.starts_with("https://api.workos.com/") {
+            return Err(AuthError::InvalidToken(format!("invalid issuer: {}", token_data.claims.iss)));
+        }
 
         token_data.claims
     } else {
