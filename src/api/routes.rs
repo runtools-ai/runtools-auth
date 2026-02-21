@@ -659,7 +659,7 @@ async fn oauth_start(
     let _auth = require_auth(&state, &headers).await?;
 
     // Resolve provider: check BYOA config first, then fall back to default
-    let byoa_provider = resolve_provider_for_org(&state, &q.org_id, &provider_id).await?;
+    let (byoa_provider, byoa_scopes) = resolve_provider_for_org(&state, &q.org_id, &provider_id).await?;
     let provider_ref: &dyn OAuthProvider;
     let default_provider;
     if let Some(ref bp) = byoa_provider {
@@ -680,10 +680,17 @@ async fn oauth_start(
         .sign_state(&state_data)
         .map_err(|e| AuthError::Internal(e.to_string()))?;
 
-    let scopes: Vec<String> = if q.scopes.is_empty() {
-        provider_ref.available_scopes()
-    } else {
+    // Scope priority: explicit request > BYOA config > default available_scopes()
+    let scopes: Vec<String> = if !q.scopes.is_empty() {
         q.scopes.split(',').map(|s| s.trim().to_string()).collect()
+    } else if let Some(ref custom) = byoa_scopes {
+        if !custom.is_empty() {
+            custom.split(',').map(|s| s.trim().to_string()).collect()
+        } else {
+            provider_ref.available_scopes()
+        }
+    } else {
+        provider_ref.available_scopes()
     };
 
     let callback_url = state.config.callback_url(&provider_id);
@@ -729,7 +736,7 @@ async fn oauth_callback(
     }
 
     // Exchange code for tokens — resolve provider with BYOA override
-    let byoa_provider = resolve_provider_for_org(&state, &org_id, &provider_id).await?;
+    let (byoa_provider, _byoa_scopes) = resolve_provider_for_org(&state, &org_id, &provider_id).await?;
     let provider_ref: &dyn OAuthProvider;
     let default_provider;
     if let Some(ref bp) = byoa_provider {
@@ -924,12 +931,13 @@ async fn oauth_connection_delete(
 /// Resolve a provider for an org: check for BYOA config first, fall back to default.
 ///
 /// If the org has a custom provider config, it creates a fresh provider instance
-/// with those credentials. Otherwise returns None (caller uses the default registry).
+/// with those credentials. Also returns the org's custom scopes (if any) so the
+/// caller can use them instead of the default available_scopes().
 async fn resolve_provider_for_org(
     state: &SharedState,
     org_id: &str,
     provider_id: &str,
-) -> Result<Option<Box<dyn OAuthProvider>>, AuthError> {
+) -> Result<(Option<Box<dyn OAuthProvider>>, Option<String>), AuthError> {
     let config = state
         .store
         .get_provider_config(&state.crypto, org_id, provider_id)
@@ -937,7 +945,13 @@ async fn resolve_provider_for_org(
 
     let config = match config {
         Some(c) => c,
-        None => return Ok(None),
+        None => return Ok((None, None)),
+    };
+
+    let custom_scopes = if config.scopes.is_empty() {
+        None
+    } else {
+        Some(config.scopes.clone())
     };
 
     // Create a provider instance with the org's custom credentials
@@ -953,7 +967,7 @@ async fn resolve_provider_for_org(
         _ => return Err(AuthError::BadRequest(format!("BYOA not supported for provider: {}", provider_id))),
     };
 
-    Ok(Some(provider))
+    Ok((Some(provider), custom_scopes))
 }
 
 #[derive(Deserialize)]
