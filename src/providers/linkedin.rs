@@ -50,16 +50,18 @@ impl OAuthProvider for LinkedInProvider {
     }
 
     fn available_scopes(&self) -> Vec<String> {
+        // Only scopes from approved LinkedIn products:
+        // - Sign In with LinkedIn (OIDC): openid, profile, email
+        // - Share on LinkedIn: w_member_social
+        // - Verified on LinkedIn: r_verify
+        // - Basic profile: r_profile_basicinfo
         vec![
             "openid".into(),
             "profile".into(),
             "email".into(),
             "w_member_social".into(),
-            "r_liteprofile".into(),
-            "r_emailaddress".into(),
-            "r_organization_social".into(),
-            "w_organization_social".into(),
-            "rw_organization_admin".into(),
+            "r_verify".into(),
+            "r_profile_basicinfo".into(),
         ]
     }
 
