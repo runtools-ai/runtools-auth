@@ -817,10 +817,10 @@ async fn oauth_callback(
             format!("{}?status=success&provider={}&connection_id={}", cli_uri, provider_id, conn_id)
         }
     } else {
-        // Dashboard flow: redirect to success page
+        // Dashboard flow: redirect to frontend success page
         format!(
-            "{}/oauth/success?provider={}&connection_id={}",
-            state.config.base_url, provider_id, conn_id
+            "{}/dashboard/oauth/success?provider={}&connection_id={}",
+            state.config.dashboard_url, provider_id, conn_id
         )
     };
     Ok(Redirect::temporary(&redirect_url).into_response())

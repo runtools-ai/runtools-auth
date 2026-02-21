@@ -7,6 +7,8 @@ pub struct Config {
     pub host: String,
     pub port: u16,
     pub base_url: String,
+    /// Dashboard frontend URL for post-OAuth redirects
+    pub dashboard_url: String,
 
     // ── Database (PostgreSQL, shared with orchestrator/tools/billing) ──
     pub database_url: String,
@@ -60,6 +62,8 @@ impl Config {
                 .context("Invalid PORT")?,
             base_url: std::env::var("BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:8420".into()),
+            dashboard_url: std::env::var("DASHBOARD_URL")
+                .unwrap_or_else(|_| "https://runtools.ai".into()),
 
             database_url: std::env::var("DATABASE_URL")
                 .context("DATABASE_URL is required (PostgreSQL connection string)")?,
