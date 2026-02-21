@@ -681,7 +681,7 @@ async fn oauth_start(
         .map_err(|e| AuthError::Internal(e.to_string()))?;
 
     let scopes: Vec<String> = if q.scopes.is_empty() {
-        vec![]
+        provider_ref.available_scopes()
     } else {
         q.scopes.split(',').map(|s| s.trim().to_string()).collect()
     };
