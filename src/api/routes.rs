@@ -643,6 +643,10 @@ struct OAuthStartQuery {
     user_id: String,
     #[serde(default)]
     scopes: String,
+    /// Optional redirect URI for CLI-initiated OAuth flows.
+    /// When set, the callback redirects here instead of the dashboard.
+    #[serde(default)]
+    redirect_uri: String,
 }
 
 /// GET /v1/oauth/start/:provider — Initiate an OAuth flow.
@@ -672,9 +676,17 @@ async fn oauth_start(
         provider_ref = default_provider;
     }
 
-    // Build state parameter: orgId:userId:timestamp
+    // Build state parameter: orgId:userId:timestamp[:redirect_uri]
     let timestamp = chrono::Utc::now().timestamp();
-    let state_data = format!("{}:{}:{}", q.org_id, q.user_id, timestamp);
+    let state_data = if q.redirect_uri.is_empty() {
+        format!("{}:{}:{}", q.org_id, q.user_id, timestamp)
+    } else {
+        // Validate redirect_uri: only allow localhost for CLI flows
+        if !q.redirect_uri.starts_with("http://localhost:") && !q.redirect_uri.starts_with("http://127.0.0.1:") {
+            return Err(AuthError::BadRequest("redirect_uri must be localhost".into()));
+        }
+        format!("{}:{}:{}:{}", q.org_id, q.user_id, timestamp, q.redirect_uri)
+    };
     let signed_state = state
         .crypto
         .sign_state(&state_data)
@@ -717,15 +729,21 @@ async fn oauth_callback(
         .verify_state(&q.state)
         .map_err(|_| AuthError::BadRequest("invalid state parameter".into()))?;
 
-    // Parse state: org_id:user_id:timestamp
-    let parts: Vec<&str> = state_data.split(':').collect();
+    // Parse state: org_id:user_id:timestamp[:redirect_uri]
+    // Note: redirect_uri contains colons (http://localhost:PORT/path), so we split carefully
+    let parts: Vec<&str> = state_data.splitn(4, ':').collect();
     if parts.len() < 3 {
         return Err(AuthError::BadRequest("malformed state parameter".into()));
     }
 
     let org_id = parts[0].to_string();
     let user_id = parts[1].to_string();
-    let timestamp: i64 = parts[2]
+    // timestamp might have the redirect_uri appended after the first colon inside parts[2]
+    // Since redirect_uri contains ":" we used splitn(4) — parts[2] is timestamp, parts[3] is redirect_uri
+    let timestamp_str = parts[2];
+    let cli_redirect_uri = parts.get(3).and_then(|s| if s.is_empty() { None } else { Some(s.to_string()) });
+
+    let timestamp: i64 = timestamp_str
         .parse()
         .map_err(|_| AuthError::BadRequest("invalid timestamp in state".into()))?;
 
@@ -790,11 +808,21 @@ async fn oauth_callback(
         )
         .await;
 
-    // Redirect to success page
-    let redirect_url = format!(
-        "{}/oauth/success?provider={}&connection_id={}",
-        state.config.base_url, provider_id, conn_id
-    );
+    // Redirect to CLI local server or dashboard success page
+    let redirect_url = if let Some(ref cli_uri) = cli_redirect_uri {
+        // CLI flow: redirect to localhost callback with success info
+        if cli_uri.contains('?') {
+            format!("{}&status=success&provider={}&connection_id={}", cli_uri, provider_id, conn_id)
+        } else {
+            format!("{}?status=success&provider={}&connection_id={}", cli_uri, provider_id, conn_id)
+        }
+    } else {
+        // Dashboard flow: redirect to success page
+        format!(
+            "{}/oauth/success?provider={}&connection_id={}",
+            state.config.base_url, provider_id, conn_id
+        )
+    };
     Ok(Redirect::temporary(&redirect_url).into_response())
 }
 
