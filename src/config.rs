@@ -45,6 +45,9 @@ pub struct Config {
     pub linkedin_client_secret: Option<String>,
     pub microsoft_client_id: Option<String>,
     pub microsoft_client_secret: Option<String>,
+    pub telegram_bot_token: Option<String>,
+    pub whatsapp_client_id: Option<String>,
+    pub whatsapp_client_secret: Option<String>,
 }
 
 impl Config {
@@ -88,6 +91,9 @@ impl Config {
             linkedin_client_secret: std::env::var("LINKEDIN_CLIENT_SECRET").ok(),
             microsoft_client_id: std::env::var("MICROSOFT_CLIENT_ID").ok(),
             microsoft_client_secret: std::env::var("MICROSOFT_CLIENT_SECRET").ok(),
+            telegram_bot_token: std::env::var("TELEGRAM_BOT_TOKEN").ok(),
+            whatsapp_client_id: std::env::var("WHATSAPP_CLIENT_ID").ok(),
+            whatsapp_client_secret: std::env::var("WHATSAPP_CLIENT_SECRET").ok(),
         })
     }
 

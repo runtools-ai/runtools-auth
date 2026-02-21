@@ -32,6 +32,8 @@ rand = "0.8"
 hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
+hex = "0.4"
+serde_urlencoded = "0.7"
 uuid = { version = "1", features = ["v4"] }
 ulid = "1"
 

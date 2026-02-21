@@ -18,7 +18,8 @@ use crate::auth::verify;
 use crate::auth::AuthContext;
 use crate::credentials;
 use crate::error::AuthError;
-use crate::store::db::ConnectionUpsert;
+use crate::providers::{self, OAuthProvider};
+use crate::store::db::{ConnectionUpsert, ProviderConfigUpsert};
 use crate::webhooks::workos as workos_webhooks;
 use crate::SharedState;
 
@@ -59,6 +60,11 @@ pub fn v1_router(state: SharedState) -> Router {
         .route("/oauth/token/{provider}", get(oauth_token))
         .route("/oauth/connections", get(oauth_connections))
         .route("/oauth/connections/{id}", delete(oauth_connection_delete))
+        .route("/oauth/status/{provider}", get(oauth_status))
+        // ── BYOA (Bring Your Own App) ──────────────────────────────────
+        .route("/oauth/configs", post(byoa_config_upsert))
+        .route("/oauth/configs", get(byoa_config_list))
+        .route("/oauth/configs/{provider}", delete(byoa_config_delete))
         // ── WorkOS Org Management (internal) ─────────────────────────────
         .route("/workos/organizations", post(workos_org_create))
         .route("/workos/organizations/{id}", patch(workos_org_update))
@@ -642,6 +648,7 @@ struct OAuthStartQuery {
 /// GET /v1/oauth/start/:provider — Initiate an OAuth flow.
 ///
 /// Requires authentication — prevents unauthenticated users from initiating OAuth flows.
+/// Supports BYOA: if the org has a custom provider config, it's used instead of the default.
 async fn oauth_start(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -651,10 +658,19 @@ async fn oauth_start(
     // Require authentication before initiating OAuth
     let _auth = require_auth(&state, &headers).await?;
 
-    let provider = state
-        .registry
-        .get(&provider_id)
-        .ok_or_else(|| AuthError::ProviderNotFound(provider_id.clone()))?;
+    // Resolve provider: check BYOA config first, then fall back to default
+    let byoa_provider = resolve_provider_for_org(&state, &q.org_id, &provider_id).await?;
+    let provider_ref: &dyn OAuthProvider;
+    let default_provider;
+    if let Some(ref bp) = byoa_provider {
+        provider_ref = bp.as_ref();
+    } else {
+        default_provider = state
+            .registry
+            .get(&provider_id)
+            .ok_or_else(|| AuthError::ProviderNotFound(provider_id.clone()))?;
+        provider_ref = default_provider;
+    }
 
     // Build state parameter: orgId:userId:timestamp
     let timestamp = chrono::Utc::now().timestamp();
@@ -671,7 +687,7 @@ async fn oauth_start(
     };
 
     let callback_url = state.config.callback_url(&provider_id);
-    let auth_url = provider.auth_url(&scopes, &signed_state, &callback_url);
+    let auth_url = provider_ref.auth_url(&scopes, &signed_state, &callback_url);
 
     Ok(Redirect::temporary(&auth_url).into_response())
 }
@@ -712,14 +728,22 @@ async fn oauth_callback(
         return Err(AuthError::BadRequest("OAuth session expired".into()));
     }
 
-    // Exchange code for tokens
-    let provider = state
-        .registry
-        .get(&provider_id)
-        .ok_or_else(|| AuthError::ProviderNotFound(provider_id.clone()))?;
+    // Exchange code for tokens — resolve provider with BYOA override
+    let byoa_provider = resolve_provider_for_org(&state, &org_id, &provider_id).await?;
+    let provider_ref: &dyn OAuthProvider;
+    let default_provider;
+    if let Some(ref bp) = byoa_provider {
+        provider_ref = bp.as_ref();
+    } else {
+        default_provider = state
+            .registry
+            .get(&provider_id)
+            .ok_or_else(|| AuthError::ProviderNotFound(provider_id.clone()))?;
+        provider_ref = default_provider;
+    }
 
     let callback_url = state.config.callback_url(&provider_id);
-    let tokens = provider
+    let tokens = provider_ref
         .exchange_code(&q.code, &callback_url)
         .await
         .map_err(|e| AuthError::ProviderError(e.to_string()))?;
@@ -891,6 +915,147 @@ async fn oauth_connection_delete(
         .await?;
 
     Ok(Json(json!({ "data": { "success": true } })))
+}
+
+// =============================================================================
+// BYOA: Provider Config CRUD + Resolution
+// =============================================================================
+
+/// Resolve a provider for an org: check for BYOA config first, fall back to default.
+///
+/// If the org has a custom provider config, it creates a fresh provider instance
+/// with those credentials. Otherwise returns None (caller uses the default registry).
+async fn resolve_provider_for_org(
+    state: &SharedState,
+    org_id: &str,
+    provider_id: &str,
+) -> Result<Option<Box<dyn OAuthProvider>>, AuthError> {
+    let config = state
+        .store
+        .get_provider_config(&state.crypto, org_id, provider_id)
+        .await?;
+
+    let config = match config {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+
+    // Create a provider instance with the org's custom credentials
+    let provider: Box<dyn OAuthProvider> = match provider_id {
+        "google" => Box::new(providers::GoogleProvider::new(config.client_id, config.client_secret)),
+        "github" => Box::new(providers::GitHubProvider::new(config.client_id, config.client_secret)),
+        "slack" => Box::new(providers::SlackProvider::new(config.client_id, config.client_secret)),
+        "discord" => Box::new(providers::DiscordProvider::new(config.client_id, config.client_secret)),
+        "x" => Box::new(providers::XProvider::new(config.client_id, config.client_secret)),
+        "linkedin" => Box::new(providers::LinkedInProvider::new(config.client_id, config.client_secret)),
+        "microsoft" => Box::new(providers::MicrosoftProvider::new(config.client_id, config.client_secret)),
+        "whatsapp" => Box::new(providers::WhatsAppProvider::new(config.client_id, config.client_secret)),
+        _ => return Err(AuthError::BadRequest(format!("BYOA not supported for provider: {}", provider_id))),
+    };
+
+    Ok(Some(provider))
+}
+
+#[derive(Deserialize)]
+struct ByoaConfigBody {
+    org_id: String,
+    provider: String,
+    client_id: String,
+    client_secret: String,
+    #[serde(default)]
+    scopes: String,
+}
+
+/// POST /v1/oauth/configs — Create or update a BYOA provider config.
+async fn byoa_config_upsert(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(body): Json<ByoaConfigBody>,
+) -> Result<Json<serde_json::Value>, AuthError> {
+    let _auth = require_auth(&state, &headers).await?;
+
+    let config = ProviderConfigUpsert {
+        org_id: body.org_id.clone(),
+        provider: body.provider.clone(),
+        client_id: body.client_id,
+        client_secret: body.client_secret,
+        scopes: body.scopes,
+    };
+
+    let id = state
+        .store
+        .upsert_provider_config(&state.crypto, &config)
+        .await?;
+
+    // Audit log
+    let _ = state
+        .store
+        .log_event(&body.org_id, "", "byoa.config.upsert", &body.provider, json!({ "config_id": id }))
+        .await;
+
+    Ok(Json(json!({ "data": { "id": id, "provider": body.provider } })))
+}
+
+#[derive(Deserialize)]
+struct ByoaConfigListQuery {
+    org_id: String,
+}
+
+/// GET /v1/oauth/configs — List BYOA provider configs.
+async fn byoa_config_list(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<ByoaConfigListQuery>,
+) -> Result<Json<serde_json::Value>, AuthError> {
+    let _auth = require_auth(&state, &headers).await?;
+
+    let configs = state.store.list_provider_configs(&q.org_id).await?;
+    Ok(Json(json!({ "data": configs })))
+}
+
+/// DELETE /v1/oauth/configs/:provider — Delete a BYOA provider config.
+async fn byoa_config_delete(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(provider): Path<String>,
+    Query(q): Query<ByoaConfigListQuery>,
+) -> Result<Json<serde_json::Value>, AuthError> {
+    let _auth = require_auth(&state, &headers).await?;
+
+    state
+        .store
+        .delete_provider_config(&q.org_id, &provider)
+        .await?;
+
+    // Audit log
+    let _ = state
+        .store
+        .log_event(&q.org_id, "", "byoa.config.delete", &provider, json!({}))
+        .await;
+
+    Ok(Json(json!({ "data": { "success": true } })))
+}
+
+/// GET /v1/oauth/status/:provider — Check if a provider is connected.
+async fn oauth_status(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(provider_id): Path<String>,
+    Query(q): Query<OAuthTokenQuery>,
+) -> Result<Json<serde_json::Value>, AuthError> {
+    let _auth = require_auth(&state, &headers).await?;
+
+    let token = state
+        .store
+        .get_token(&state.crypto, &q.org_id, &q.user_id, &provider_id)
+        .await?;
+
+    let connected = match token {
+        Some(t) => !t.is_expired,
+        None => false,
+    };
+
+    Ok(Json(json!({ "data": { "connected": connected, "provider": provider_id } })))
 }
 
 // =============================================================================

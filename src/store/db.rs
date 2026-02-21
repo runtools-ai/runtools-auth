@@ -140,6 +140,33 @@ impl TokenStore {
         .execute(&self.pool)
         .await?;
 
+        // OAuth provider configs (BYOA - Bring Your Own App)
+        // Allows orgs to use their own OAuth app credentials instead of Runtools defaults.
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS oauth_provider_configs (
+                id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                org_id          TEXT NOT NULL,
+                provider        TEXT NOT NULL,
+                client_id       TEXT NOT NULL,
+                client_secret   TEXT NOT NULL,
+                scopes          TEXT DEFAULT '',
+                enabled         BOOLEAN DEFAULT true,
+                created_at      TIMESTAMPTZ DEFAULT NOW(),
+                updated_at      TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(org_id, provider)
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_provider_configs_org ON oauth_provider_configs(org_id)"
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -455,6 +482,142 @@ impl TokenStore {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
+
+    // =========================================================================
+    // BYOA: Provider Config CRUD
+    // =========================================================================
+
+    /// Upsert a per-org OAuth provider config (BYOA).
+    pub async fn upsert_provider_config(
+        &self,
+        crypto: &CryptoEngine,
+        config: &ProviderConfigUpsert,
+    ) -> Result<String, AuthError> {
+        let enc_secret = crypto
+            .encrypt(&config.client_secret)
+            .map_err(|e| AuthError::Encryption(e.to_string()))?;
+
+        let row = sqlx::query(
+            r#"
+            INSERT INTO oauth_provider_configs
+                (org_id, provider, client_id, client_secret, scopes, enabled)
+            VALUES ($1, $2, $3, $4, $5, true)
+            ON CONFLICT (org_id, provider)
+            DO UPDATE SET
+                client_id = EXCLUDED.client_id,
+                client_secret = EXCLUDED.client_secret,
+                scopes = EXCLUDED.scopes,
+                enabled = true,
+                updated_at = NOW()
+            RETURNING id::text
+            "#,
+        )
+        .bind(&config.org_id)
+        .bind(&config.provider)
+        .bind(&config.client_id)
+        .bind(&enc_secret)
+        .bind(&config.scopes)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let id: String = row.get(0);
+        Ok(id)
+    }
+
+    /// Get a decrypted provider config for a specific org + provider.
+    pub async fn get_provider_config(
+        &self,
+        crypto: &CryptoEngine,
+        org_id: &str,
+        provider: &str,
+    ) -> Result<Option<ProviderConfig>, AuthError> {
+        let row = sqlx::query(
+            r#"
+            SELECT id::text, client_id, client_secret, scopes, enabled, created_at, updated_at
+            FROM oauth_provider_configs
+            WHERE org_id = $1 AND provider = $2 AND enabled = true
+            "#,
+        )
+        .bind(org_id)
+        .bind(provider)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let row = match row {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        let enc_secret: String = row.get(2);
+        let client_secret = crypto
+            .decrypt(&enc_secret)
+            .map_err(|e| AuthError::Decryption(e.to_string()))?;
+
+        Ok(Some(ProviderConfig {
+            id: row.get(0),
+            client_id: row.get(1),
+            client_secret,
+            scopes: row.get(3),
+            enabled: row.get(4),
+            created_at: row.get(5),
+            updated_at: row.get(6),
+        }))
+    }
+
+    /// List all provider configs for an org (metadata only, secrets masked).
+    pub async fn list_provider_configs(
+        &self,
+        org_id: &str,
+    ) -> Result<Vec<ProviderConfigInfo>, AuthError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id::text, provider, client_id, scopes, enabled, created_at, updated_at
+            FROM oauth_provider_configs
+            WHERE org_id = $1
+            ORDER BY provider
+            "#,
+        )
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let configs = rows
+            .iter()
+            .map(|row| ProviderConfigInfo {
+                id: row.get(0),
+                provider: row.get(1),
+                client_id: row.get(2),
+                scopes: row.get(3),
+                enabled: row.get(4),
+                created_at: row.get(5),
+                updated_at: row.get(6),
+            })
+            .collect();
+
+        Ok(configs)
+    }
+
+    /// Delete a provider config (disables BYOA for that provider).
+    pub async fn delete_provider_config(
+        &self,
+        org_id: &str,
+        provider: &str,
+    ) -> Result<(), AuthError> {
+        let affected = sqlx::query(
+            "DELETE FROM oauth_provider_configs WHERE org_id = $1 AND provider = $2",
+        )
+        .bind(org_id)
+        .bind(provider)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
+        if affected == 0 {
+            return Err(AuthError::NotFound("provider config".into()));
+        }
+
+        Ok(())
+    }
 }
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -507,4 +670,37 @@ pub struct ExpiringConnection {
     pub user_id: String,
     pub provider: String,
     pub refresh_token: Option<String>,
+}
+
+// ── BYOA Types ──────────────────────────────────────────────────────────────
+
+#[derive(Debug)]
+pub struct ProviderConfigUpsert {
+    pub org_id: String,
+    pub provider: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub scopes: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProviderConfig {
+    pub id: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub scopes: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProviderConfigInfo {
+    pub id: String,
+    pub provider: String,
+    pub client_id: String,
+    pub scopes: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
