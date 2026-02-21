@@ -47,21 +47,18 @@ impl OAuthProvider for GoogleProvider {
     }
 
     fn available_scopes(&self) -> Vec<String> {
+        // Only CASA-approved scopes
         vec![
-            "https://www.googleapis.com/auth/gmail.readonly".into(),
-            "https://www.googleapis.com/auth/gmail.send".into(),
-            "https://www.googleapis.com/auth/gmail.modify".into(),
-            "https://www.googleapis.com/auth/calendar".into(),
-            "https://www.googleapis.com/auth/calendar.readonly".into(),
-            "https://www.googleapis.com/auth/drive".into(),
-            "https://www.googleapis.com/auth/drive.readonly".into(),
-            "https://www.googleapis.com/auth/spreadsheets".into(),
-            "https://www.googleapis.com/auth/spreadsheets.readonly".into(),
-            "https://www.googleapis.com/auth/documents".into(),
-            "https://www.googleapis.com/auth/documents.readonly".into(),
             "openid".into(),
             "email".into(),
             "profile".into(),
+            // Gmail — gmail.modify covers read + compose + send
+            "https://www.googleapis.com/auth/gmail.modify".into(),
+            // Calendar
+            "https://www.googleapis.com/auth/calendar".into(),
+            "https://www.googleapis.com/auth/calendar.events".into(),
+            // Drive — drive.file = only files created by this app
+            "https://www.googleapis.com/auth/drive.file".into(),
         ]
     }
 
