@@ -713,8 +713,18 @@ async fn oauth_start(
 
 #[derive(Deserialize)]
 struct OAuthCallbackQuery {
-    code: String,
-    state: String,
+    /// The authorization code — present on success, absent on denial/error.
+    #[serde(default)]
+    code: Option<String>,
+    /// State parameter — always present (we set it in oauth_start).
+    #[serde(default)]
+    state: Option<String>,
+    /// Error code — present when user denies or provider returns an error.
+    #[serde(default)]
+    error: Option<String>,
+    /// Human-readable error description from the provider.
+    #[serde(default)]
+    error_description: Option<String>,
 }
 
 /// GET /v1/oauth/callback/:provider — Handle OAuth callback.
@@ -723,10 +733,72 @@ async fn oauth_callback(
     Path(provider_id): Path<String>,
     Query(q): Query<OAuthCallbackQuery>,
 ) -> Result<Response, AuthError> {
+    // Handle OAuth denial / error from provider (e.g. user clicked Cancel)
+    if let Some(ref error) = q.error {
+        let desc = q
+            .error_description
+            .as_deref()
+            .unwrap_or("Authorization was denied");
+        tracing::warn!(
+            provider = %provider_id,
+            error = %error,
+            description = %desc,
+            "OAuth callback received error from provider"
+        );
+
+        // Try to extract the redirect from the state if present, otherwise go to dashboard
+        let redirect_url = if let Some(ref state_str) = q.state {
+            if let Ok(state_data) = state.crypto.verify_state(state_str) {
+                let parts: Vec<&str> = state_data.splitn(4, ':').collect();
+                // If there's a CLI redirect_uri, send error there
+                if let Some(cli_uri) = parts.get(3).and_then(|s| if s.is_empty() { None } else { Some(*s) }) {
+                    let sep = if cli_uri.contains('?') { "&" } else { "?" };
+                    format!(
+                        "{}{}status=error&provider={}&error={}",
+                        cli_uri, sep, provider_id, url::form_urlencoded::byte_serialize(error.as_bytes()).collect::<String>()
+                    )
+                } else {
+                    format!(
+                        "{}/dashboard/oauth/success?provider={}&error={}",
+                        state.config.dashboard_url,
+                        provider_id,
+                        url::form_urlencoded::byte_serialize(desc.as_bytes()).collect::<String>()
+                    )
+                }
+            } else {
+                format!(
+                    "{}/dashboard/oauth/success?provider={}&error={}",
+                    state.config.dashboard_url,
+                    provider_id,
+                    url::form_urlencoded::byte_serialize(desc.as_bytes()).collect::<String>()
+                )
+            }
+        } else {
+            format!(
+                "{}/dashboard/oauth/success?provider={}&error={}",
+                state.config.dashboard_url,
+                provider_id,
+                url::form_urlencoded::byte_serialize(desc.as_bytes()).collect::<String>()
+            )
+        };
+
+        return Ok(Redirect::temporary(&redirect_url).into_response());
+    }
+
+    // From here on, code and state must be present
+    let code = q
+        .code
+        .as_deref()
+        .ok_or_else(|| AuthError::BadRequest("missing authorization code".into()))?;
+    let state_str = q
+        .state
+        .as_deref()
+        .ok_or_else(|| AuthError::BadRequest("missing state parameter".into()))?;
+
     // Verify state signature
     let state_data = state
         .crypto
-        .verify_state(&q.state)
+        .verify_state(state_str)
         .map_err(|_| AuthError::BadRequest("invalid state parameter".into()))?;
 
     // Parse state: org_id:user_id:timestamp[:redirect_uri]
@@ -769,7 +841,7 @@ async fn oauth_callback(
 
     let callback_url = state.config.callback_url(&provider_id);
     let tokens = provider_ref
-        .exchange_code(&q.code, &callback_url)
+        .exchange_code(code, &callback_url)
         .await
         .map_err(|e| AuthError::ProviderError(e.to_string()))?;
 
